@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ask the Database</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg:#f6f7f9; --card:#fff; --text:#1d2433; --muted:#667085; --line:#e4e7ec; --accent:#2563eb;
+            --code-bg:#0f172a; --code:#e2e8f0; --warn-bg:#fffaeb; --warn:#b54708; --bad-bg:#fef3f2; --bad:#b42318; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:1100px; margin:0 auto; padding:24px 16px 48px; }
+    h1 { font-size:22px; margin:0 0 4px; }
+    .muted { color:var(--muted); }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin-top:16px; }
+    form { display:flex; gap:8px; }
+    input[type=text] { flex:1; padding:12px 14px; border:1px solid var(--line); border-radius:10px; font:inherit; font-size:15px; }
+    button { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:0 18px; font:inherit; font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:wait; }
+    .examples { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+    .examples button { background:#eef2ff; color:#3730a3; font-weight:500; padding:6px 10px; border-radius:999px; font-size:13px; }
+    pre { background:var(--code-bg); color:var(--code); padding:14px; border-radius:10px; overflow:auto; font-size:13px; margin:8px 0 0; white-space:pre-wrap; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); }
+    th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--card); }
+    td.num { text-align:right; font-variant-numeric:tabular-nums; }
+    .table-wrap { max-height:420px; overflow:auto; margin-top:8px; }
+    .note { padding:10px 12px; border-radius:10px; background:var(--warn-bg); color:var(--warn); margin-top:10px; }
+    .error { background:var(--bad-bg); color:var(--bad); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:16px; }
+    h2 { font-size:14px; margin:0; }
+    .meta { font-size:12px; color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Ask the Database</h1>
+  <div class="muted">Plain-language questions about a (fictional) retail chain → SQL → results. The SQL runs read-only, with a timeout, after passing a safety check.</div>
+
+  <div class="card">
+    <form id="f">
+      <input type="text" id="q" placeholder="e.g. Which 5 stores had the highest revenue in 2025?" autocomplete="off" required>
+      <button id="go" type="submit">Ask</button>
+    </form>
+    <div class="examples" id="examples"></div>
+  </div>
+
+  <div id="out"></div>
+</main>
+
+<script>
+const EXAMPLES = [
+  "Top 5 product categories by revenue in 2025",
+  "Monthly revenue for 2025",
+  "Which store had the most online orders last month?",
+  "Berapa rata-rata nilai pesanan per kota pelanggan?",
+  "Share of business vs consumer customers' revenue",
+  "Delete all cancelled orders",
+];
+const ex = document.getElementById("examples");
+for (const e of EXAMPLES) {
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = e;
+  b.onclick = () => { document.getElementById("q").value = e; document.getElementById("f").requestSubmit(); };
+  ex.appendChild(b);
+}
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// Years, months and ids are labels: no thousands separators
+const LABEL_COL = /^(year|quarter|month|week|day)(_?(num|number|of_year))?$|(^id$|_id$)/i;
+const fmt = (v, col) => typeof v === "number" && !LABEL_COL.test(col) ? v.toLocaleString("en-US", { maximumFractionDigits: 2 }) : esc(v);
+let chart;
+
+document.getElementById("f").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = document.getElementById("q").value.trim();
+  const go = document.getElementById("go");
+  const out = document.getElementById("out");
+  go.disabled = true; go.textContent = "Thinking…";
+  out.innerHTML = `<div class="card muted">Writing and checking the query… (a local model can take 20–60 s)</div>`;
+  try {
+    const r = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q }) });
+    render(await r.json());
+  } catch (err) {
+    out.innerHTML = `<div class="card note error">Request failed: ${esc(err)}</div>`;
+  } finally {
+    go.disabled = false; go.textContent = "Ask";
+  }
+});
+
+function render(a) {
+  const out = document.getElementById("out");
+  if (!a.answerable) {
+    out.innerHTML = `<div class="card"><h2>Not answered</h2><div class="note">${esc(a.explanation || "This question can't be answered with a read-only query on this data.")}</div></div>`;
+    return;
+  }
+  const failed = a.attempts.filter((t) => t.error);
+  const repairs = failed.length && !a.error ? `<div class="meta">Fixed automatically after: ${failed.map((t) => esc(t.error)).join("; ")}</div>` : "";
+  let html = `<div class="card"><h2>SQL</h2><div class="meta">${esc(a.explanation)} · ${a.seconds}s</div><pre>${esc(a.sql)}</pre>${repairs}`;
+  if (a.error) html += `<div class="note error">${esc(a.error)}</div>`;
+  html += `</div>`;
+  if (!a.error) {
+    const numeric = a.columns.map((_, i) => a.rows.every((r) => typeof r[i] === "number" || r[i] === null));
+    html += `<div class="grid"><div class="card"><h2>Result · ${a.rows.length}${a.truncated ? "+" : ""} rows</h2><div class="table-wrap"><table><thead><tr>`
+      + a.columns.map((c, i) => `<th class="${numeric[i] ? "num" : ""}">${esc(c)}</th>`).join("")
+      + `</tr></thead><tbody>`
+      + a.rows.map((r) => `<tr>${r.map((v, i) => `<td class="${numeric[i] ? "num" : ""}">${fmt(v, a.columns[i])}</td>`).join("")}</tr>`).join("")
+      + `</tbody></table></div></div>`
+      + (a.chart ? `<div class="card"><h2>Chart</h2><canvas id="c" height="260"></canvas></div>` : "")
+      + `</div>`;
+  }
+  out.innerHTML = html;
+  if (a.chart && !a.error) drawChart(a);
+}
+
+function drawChart(a) {
+  const xs = a.chart.x.map((c) => a.columns.indexOf(c));
+  const pad = (v) => (typeof v === "number" && v < 100 ? String(v).padStart(2, "0") : String(v));
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById("c"), {
+    type: a.chart.type,
+    data: {
+      labels: a.rows.map((r) => xs.map((i) => pad(r[i])).join("-")),
+      datasets: a.chart.series.map((s) => ({ label: s, data: a.rows.map((r) => r[a.columns.indexOf(s)]), borderWidth: 2, tension: 0.25 })),
+    },
+    options: { responsive: true, plugins: { legend: { display: a.chart.series.length > 1 } }, scales: { y: { beginAtZero: true } } },
+  });
+}
+</script>
+</body>
+</html>

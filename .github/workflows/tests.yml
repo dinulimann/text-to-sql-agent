@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: owner
+          POSTGRES_PASSWORD: owner
+          POSTGRES_DB: shop
+        ports:
+          - 5550:5432
+        options: >-
+          --health-cmd "pg_isready -U owner -d shop"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Load schema, data, read-only role and view
+        env:
+          PGPASSWORD: owner
+        run: for f in db/*.sql; do psql -h localhost -p 5550 -U owner -d shop -v ON_ERROR_STOP=1 -q -f "$f"; done
+      - run: pip install -r requirements-dev.txt
+      - name: Tests (model mocked)
+        run: pytest -q
